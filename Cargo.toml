@@ -1,28 +1,28 @@
 [package]
 name = "tunl"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-tokio = { version = "1.28", features = ["io-util", "rt"] }
+tokio = { version = "1.46", features = ["io-util", "rt"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base64 = "0.22"
-getrandom = { version = "0.2", features = ["js"] }
-worker = "0.0.18"
-futures-util = "0.3.28"
+getrandom = { version = "0.2.16", features = ["js"] }
+worker = "0.6.0"
+futures-util = "0.3.31"
 pin-project-lite = "0.2"
-uuid = "1.8.0"
-bytes = "1.4.0"
+uuid = "1.17.0"
+bytes = "1.10.1"
 aes-gcm = "0.10"
 aes = "0.8"
 sha2 = "0.10"
 md-5 = "0.10"
-anyhow = "1.0.86"
-reqwest = "0.12.5"
+anyhow = "1.0.98"
+reqwest = "0.12.22"
 
 
 [profile.release]
