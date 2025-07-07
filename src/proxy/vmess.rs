@@ -1,23 +1,24 @@
 use crate::common::{
-    hash, KDFSALT_CONST_AEAD_RESP_HEADER_IV, KDFSALT_CONST_AEAD_RESP_HEADER_KEY,
+    KDFSALT_CONST_AEAD_RESP_HEADER_IV, KDFSALT_CONST_AEAD_RESP_HEADER_KEY,
     KDFSALT_CONST_AEAD_RESP_HEADER_LEN_IV, KDFSALT_CONST_AEAD_RESP_HEADER_LEN_KEY,
     KDFSALT_CONST_VMESS_HEADER_PAYLOAD_AEAD_IV, KDFSALT_CONST_VMESS_HEADER_PAYLOAD_AEAD_KEY,
     KDFSALT_CONST_VMESS_HEADER_PAYLOAD_LENGTH_AEAD_IV,
-    KDFSALT_CONST_VMESS_HEADER_PAYLOAD_LENGTH_AEAD_KEY,
+    KDFSALT_CONST_VMESS_HEADER_PAYLOAD_LENGTH_AEAD_KEY, hash,
 };
 use crate::config::Config;
-
-use std::io::Cursor;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-
 use aes::cipher::KeyInit;
 use aes_gcm::{
-    aead::{Aead, Payload},
     Aes128Gcm,
+    aead::{Aead, Payload},
 };
 use md5::{Digest, Md5};
 use sha2::Sha256;
+use std::{
+    io::Cursor,
+    pin::Pin,
+    task::{Context, Poll},
+};
+use tokio::io::copy_bidirectional;
 
 use bytes::{BufMut, BytesMut};
 use futures_util::Stream;
@@ -153,18 +154,13 @@ impl<'a> VmessStream<'a> {
         buf.read_exact(&mut options).await?;
 
         let cmd = buf.read_u8().await?;
-        let is_tcp = cmd == 0x1;
+        let is_tcp = cmd == 0x01;
 
-        let port = {
-            let mut port = [0u8; 2];
-            buf.read_exact(&mut port).await?;
-            ((port[0] as u16) << 8) | (port[1] as u16)
-        };
+        let port = buf.read_u16().await?;
         let addr = crate::common::parse_addr(&mut buf).await?;
 
         console_log!("connecting to upstream {}:{} [is_tcp={is_tcp}]", addr, port);
 
-        // encrypt payload
         let key = &crate::sha256!(&key)[..16];
         let iv = &crate::sha256!(&iv)[..16];
 
@@ -191,8 +187,45 @@ impl<'a> VmessStream<'a> {
         self.write(&header).await?;
 
         if is_tcp {
-            let mut upstream = Socket::builder().connect(addr, port)?;
-            tokio::io::copy_bidirectional(self, &mut upstream).await?;
+            let mut errors = vec![];
+            let proxy_addr: Vec<String> = self.config.proxy_ip.clone();
+
+            for target in [vec![addr.clone()], proxy_addr.clone()].concat() {
+                let (remote_host, remote_port) = if proxy_addr.contains(&target) {
+                    match target.rsplit_once(':') {
+                        Some((host, port_str)) => {
+                            (host.to_string(), port_str.parse::<u16>().unwrap_or(port))
+                        }
+                        None => (target.clone(), port),
+                    }
+                } else {
+                    (target.clone(), port)
+                };
+
+                match Socket::builder().connect(remote_host, remote_port) {
+                    Ok(mut remote) => {
+                        if remote.opened().await.is_err() {
+                            errors.push("socket not open".into());
+                            continue;
+                        }
+
+                        // start forwarding
+                        if let Err(e) = copy_bidirectional(self, &mut remote).await {
+                            errors.push(e.to_string());
+                        } else {
+                            return Ok(());
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(e.to_string());
+                        continue;
+                    }
+                }
+            }
+
+            Err(Error::RustError(format!(
+                "all tcp attempts failed: {errors:?}"
+            )))
         } else {
             // cloudflare worker doesn't support udp but we can handle some special cases
             // for example if request is dns over udp we can instead use the request and
@@ -200,15 +233,13 @@ impl<'a> VmessStream<'a> {
 
             // DNS:
             let mut buff = vec![0u8; 65535];
-
             let n = self.read(&mut buff).await?;
             let data = &buff[..n];
             if crate::dns::doh(data).await.is_ok() {
                 self.write(&data).await?;
             }
+            Ok(())
         }
-
-        Ok(())
     }
 }
 
